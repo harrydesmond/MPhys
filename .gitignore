@@ -1,0 +1,31 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# SLURM job output
+*.out
+
+# Large numpy sample files (>100MB)
+samples_53_scatter_EFE0_rar.npy
+
+# HDF5 simulation data files
+*.hdf5
+
+# Large computed acceleration CSV directories (100s MB each)
+Stars_pytree/
+Total_pytree/
+Pytree_testing/
+
+# Per-galaxy computed result CSVs
+RAR_tester/
+RAR_for_all/*.csv
+pytree_results/*.csv
+
+# TNG-50 large raw data
+TNG-50/Gas_densities/
+TNG-50/Total_pytree/
+TNG-50/Stars_pytree/
+
+# Duplicate submodule copy
+RARinterpret copy/

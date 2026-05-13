@@ -1,0 +1,767 @@
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import numpy as np
+import h5py
+import ozy
+from scipy.constants import G
+
+def load_all_data(star_filename, dm_filename, gas_filename, ozy_file):
+
+    total_data = defaultdict(list)
+
+    filenames = [star_filename, dm_filename, gas_filename]
+
+    sim = ozy.load(ozy_file)
+
+    for i in range(len(filenames)):
+
+        if i != 2:
+
+            with h5py.File(filenames[i], "r") as f:
+
+                key = list(f.keys())[0]
+
+                #Get the HDF5 group; key needs to be a group name from above
+                group = f[key]
+
+                variables = defaultdict(list)
+                #Checkout what keys are inside that group.
+                for key in group.keys():
+                    variables[key].append(group[key][()])
+                    #print(key)
+
+                data = defaultdict(list)
+
+                data['x'] = variables['x'][0]
+                data['y'] = variables['y'][0]
+                data['z'] = variables['z'][0]
+
+                data['vx'] = variables['vx'][0]
+                data['vy'] = variables['vy'][0]
+                data['vz'] = variables['vz'][0]
+
+                data['mass'] = variables['mass'][0]
+
+                f.close()
+
+            if i == 0:
+                total_data['star_data'] = data
+
+            elif i == 1:
+                total_data['dm_data'] = data
+
+        else:
+
+            with h5py.File(gas_filename, 'r') as f:
+
+                data3d = sim.array(f['grid/gas/density'][:], f['grid/gas/density'].attrs.get("unit", "unknown"))
+                nx, ny, nz = data3d.shape
+
+                data = f['grid']['gas']
+
+                limits = f['limits']
+
+                #Limits already seem to be in units of kpc
+                
+                xmax = limits['xmax'][()]
+                xmin = limits['xmin'][()]
+                ymax = limits['ymax'][()]
+                ymin = limits['ymin'][()]
+                zmax = limits['zmax'][()]
+                zmin = limits['zmin'][()]
+
+                density_data = np.array(data['density'], order='C')
+
+                mass_data = np.array(data['mass'], order='C')
+
+                vx_data = np.array(data['vx_box'], order='C')
+
+                vy_data = np.array(data['vy_box'], order='C')
+                
+                vz_data = np.array(data['vz_box'], order='C')
+
+                f.close()
+
+            x_axis_size = xmax - xmin
+            y_axis_size = ymax - ymin
+            z_axis_size = zmax - zmin
+
+            # --- Construct physical grid of cell centers ---
+            x = np.linspace(xmin + 0.5 * (xmax - xmin) / nx, xmax - 0.5 * (xmax - xmin) / nx, nx)
+            y = np.linspace(ymin + 0.5 * (ymax - ymin) / ny, ymax - 0.5 * (ymax - ymin) / ny, ny)
+            z = np.linspace(zmin + 0.5 * (zmax - zmin) / nz, zmax - 0.5 * (zmax - zmin) / nz, nz)
+
+            # Meshgrid using Fortran-style indexing (i, j, k)
+            X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+
+            volume_element = (x_axis_size/200)*(y_axis_size/200)*(z_axis_size/200)
+
+            # Flatten everything
+            positions = np.column_stack((X.ravel(order='C'), Y.ravel(order='C'), Z.ravel(order='C')))
+            densities = density_data.ravel(order='C')
+            masses = densities*volume_element
+            velocities = np.column_stack((vx_data.ravel(order='C'), vy_data.ravel(order='C'), vz_data.ravel(order='C')))
+
+            data = defaultdict(list)
+
+            data['x'] = positions[:,0]
+            data['y'] = positions[:,1]
+            data['z'] = positions[:,2]
+
+            data['vx'] = velocities[:,0]
+            data['vy'] = velocities[:,1]
+            data['vz'] = velocities[:,2]
+
+            #Mass in units of *kpc^3
+
+            data['mass'] = masses
+
+            data['density'] = densities
+
+            total_data['gas_data'] = data
+        
+
+    part_mass = sim.quantity(1,'code_mass')
+
+    length = sim.quantity(1, 'code_length')
+
+    part_time = sim.quantity(1,'code_time')
+
+    time_multiplier = part_time.to('s')
+
+    mass_multiplier = part_mass.to('Msun')
+
+    length_multiplier = length.to('kpc')
+
+    for i in total_data:
+            
+        data = total_data[i]
+
+        if i == 'star_data' or i == 'gas_data':
+            x_cm = np.nansum(data['x']*data['mass'])/np.nansum(data['mass'])
+            y_cm = np.nansum(data['y']*data['mass'])/np.nansum(data['mass'])
+            z_cm = np.nansum(data['z']*data['mass'])/np.nansum(data['mass'])
+
+        #Alters data to be distance from centre of galaxy rather than position in simulation
+
+        data['vx'] = data['vx']*length_multiplier/time_multiplier
+        data['vy'] = data['vy']*length_multiplier/time_multiplier
+        data['vz'] = data['vz']*length_multiplier/time_multiplier
+
+        if i == 'gas_data':
+            #Gas data has positions already in kpc and mass data in terms of mass/length^3
+            data['mass'] = data['mass']*mass_multiplier/length_multiplier**3
+            data['x'] = (data['x'] - x_cm)
+            data['y'] = (data['y'] - y_cm)
+            data['z'] = (data['z'] - z_cm)
+            data['density'] = data['density']*mass_multiplier/length_multiplier**3
+        
+        else:
+            data['mass'] = data['mass']*mass_multiplier
+            data['x'] = (data['x'] - x_cm)*length_multiplier
+            data['y'] = (data['y'] - y_cm)*length_multiplier
+            data['z'] = (data['z'] - z_cm)*length_multiplier
+
+        #Need to move into center of mass frame of the galaxy
+
+        velocities = np.column_stack((data['vx'], data['vy'], data['vz']))
+
+        total_momentum = np.sum(velocities * data['mass'][:, np.newaxis], axis=0)
+
+        velocities = velocities - total_momentum / np.sum(data['mass'])
+
+        data['vx'] = velocities[:, 0]
+        data['vy'] = velocities[:, 1]
+        data['vz'] = velocities[:, 2]
+
+        if i == 'gas_data':
+
+            #USING DENSITY CRITERIA THAT THERE MUST BE MORE THAN 5 PARTICLES IN ONE CM^3
+
+            Msun_to_H = 1.989e30/1.67e-27
+            kpc_to_cm = 3.086e21
+
+            densities_criteria = data['density'] * Msun_to_H/(kpc_to_cm**3)
+
+            mask = densities_criteria > 0.1
+
+            data['x'] = data['x'][mask]
+            data['y'] = data['y'][mask]
+            data['z'] = data['z'][mask]
+            data['mass'] = data['mass'][mask]
+            data['density'] = data['density'][mask]
+            data['vx'] = data['vx'][mask]
+            data['vy'] = data['vy'][mask]
+            data['vz'] = data['vz'][mask]
+
+            mask = np.isnan(data['vx'])
+
+            data['vx'] = data['vx'][~mask]
+            data['vy'] = data['vy'][~mask]
+            data['vz'] = data['vz'][~mask]
+
+            data['x'] = data['x'][~mask]
+            data['y'] = data['y'][~mask]
+            data['z'] = data['z'][~mask]
+
+            data['mass'] = data['mass'][~mask]
+            data['density'] = data['density'][~mask]
+
+
+
+        total_data[i] = data
+    
+    star_data = total_data['star_data']
+    dm_data = total_data['dm_data']
+    gas_data = total_data['gas_data']
+
+    return star_data, dm_data, gas_data, mass_multiplier, length_multiplier, time_multiplier
+
+
+def load_data(star_filename, dm_filename, ozy_file):
+
+    total_data = defaultdict(list)
+    filenames = [star_filename, dm_filename]
+
+    for i in range(2):
+
+        with h5py.File(filenames[i], "r") as f:
+            
+            key = list(f.keys())[0]
+
+            #Get the HDF5 group; key needs to be a group name from above
+            group = f[key]
+
+            variables = defaultdict(list)
+            #Checkout what keys are inside that group.
+            for key in group.keys():
+                variables[key].append(group[key][()])
+                #print(key)
+
+            data = defaultdict(list)
+
+            data['x'] = variables['x'][0]
+            data['y'] = variables['y'][0]
+            data['z'] = variables['z'][0]
+
+            data['vx'] = variables['vx'][0]
+            data['vy'] = variables['vy'][0]
+            data['vz'] = variables['vz'][0]
+
+            data['mass'] = variables['mass'][0]
+
+            if i == 0:
+            
+                x_cm = np.sum(data['x']*data['mass'])/np.sum(data['mass'])
+                y_cm = np.sum(data['y']*data['mass'])/np.sum(data['mass'])
+                z_cm = np.sum(data['z']*data['mass'])/np.sum(data['mass'])
+
+            #Alters data to be distance from centre of galaxy rather than position in simulation
+            #Multiplies by 142000 to convert to kpc
+
+            #Change data so that it is distance from the centre of the galaxy
+
+
+            sim = ozy.load(ozy_file)
+
+            part_mass = sim.quantity(1,'code_mass')
+
+            length = sim.quantity(1, 'code_length')
+
+            part_time = sim.quantity(1,'code_time')
+
+            time_multiplier = part_time.to('s')
+
+            mass_multiplier = part_mass.to('Msun')
+
+            length_multiplier = length.to('kpc')
+
+
+            data['x'] = (data['x'] - x_cm)*length_multiplier
+            data['y'] = (data['y'] - y_cm)*length_multiplier
+            data['z'] = (data['z'] - z_cm)*length_multiplier
+
+            data['vx'] = data['vx']*length_multiplier/time_multiplier
+            data['vy'] = data['vy']*length_multiplier/time_multiplier
+            data['vz'] = data['vz']*length_multiplier/time_multiplier
+
+            data['mass'] = data['mass']*mass_multiplier
+
+            #Need to move into center of mass frame of the galaxy
+
+            velocities = np.column_stack((data['vx'], data['vy'], data['vz']))
+
+            total_momentum = np.sum(velocities * data['mass'][:, np.newaxis], axis=0)
+
+            velocities = velocities - total_momentum / np.sum(data['mass'])
+
+            data['vx'] = velocities[:, 0]
+            data['vy'] = velocities[:, 1]
+            data['vz'] = velocities[:, 2]
+
+            print(len(data['x']))
+
+            if i == 0:
+                total_data['star_data'] = data
+            else:
+                total_data['dm_data'] = data
+
+            f.close()
+
+    star_data = total_data['star_data']
+    dm_data = total_data['dm_data']
+
+
+    return star_data, dm_data, mass_multiplier, length_multiplier, time_multiplier
+
+def load_gas_data(gas_filename, ozy_file):
+
+    sim = ozy.load(ozy_file)
+
+    with h5py.File(gas_filename, 'r') as f:
+
+        data3d = sim.array(f['grid/gas/density'][:], f['grid/gas/density'].attrs.get("unit", "unknown"))
+        nx, ny, nz = data3d.shape
+
+        data = f['grid']['gas']
+
+        limits = f['limits']
+
+        #Limits already seem to be in units of kpc
+        
+        xmax = limits['xmax'][()]
+        xmin = limits['xmin'][()]
+        ymax = limits['ymax'][()]
+        ymin = limits['ymin'][()]
+        zmax = limits['zmax'][()]
+        zmin = limits['zmin'][()]
+
+        density_data = np.array(data['density'], order='C')
+
+        mass_data = np.array(data['mass'])
+
+        vx_data = np.array(data['vx_box'])
+
+        vy_data = np.array(data['vy_box'])
+        
+        vz_data = np.array(data['vz_box'])
+
+        f.close()
+
+    x_axis_size = xmax - xmin
+    y_axis_size = ymax - ymin
+    z_axis_size = zmax - zmin
+
+    plt.figure(figsize=(6, 5))
+
+    plt.rcParams["axes.formatter.use_mathtext"] = True
+    plt.rcParams["mathtext.fontset"] = "cm"
+    plt.rcParams['font.family'] = 'cmr10' 
+    plt.rcParams["xtick.labelsize"] = 16   # Increase x-axis tick font size
+    plt.rcParams["ytick.labelsize"] = 16
+
+    from matplotlib import colors
+
+    density_plot = np.sum(density_data, axis=2).T
+    plt.imshow(density_plot, origin='lower', cmap='viridis', norm=colors.LogNorm(), 
+               extent=[xmin, xmax, ymin, ymax], aspect='auto')
+    cbar = plt.colorbar()
+    cbar.set_label(r'$\rho$', size=20, labelpad = 12)
+
+    # --- Construct physical grid of cell centers ---
+    x = np.linspace(xmin + 0.5 * (xmax - xmin) / nx, xmax - 0.5 * (xmax - xmin) / nx, nx)
+    y = np.linspace(ymin + 0.5 * (ymax - ymin) / ny, ymax - 0.5 * (ymax - ymin) / ny, ny)
+    z = np.linspace(zmin + 0.5 * (zmax - zmin) / nz, zmax - 0.5 * (zmax - zmin) / nz, nz)
+
+    # Meshgrid using Fortran-style indexing (i, j, k)
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+
+    volume_element = (x_axis_size/200)*(y_axis_size/200)*(z_axis_size/200)
+
+    # Flatten everything
+    positions = np.column_stack((X.ravel(order='C'), Y.ravel(order='C'), Z.ravel(order='C')))
+    densities = density_data.ravel(order='C')
+    velocities = np.column_stack((vx_data.ravel(order='C'), vy_data.ravel(order='C'), vz_data.ravel(order='C')))
+
+
+    part_mass = sim.quantity(1,'code_mass')
+
+    length = sim.quantity(1, 'code_length')
+
+    part_time = sim.quantity(1,'code_time')
+
+    time_multiplier = part_time.to('s')
+
+    mass_multiplier = part_mass.to('Msun')
+
+    length_multiplier = length.to('kpc')
+
+    velocities = velocities*length_multiplier/time_multiplier
+    densities = densities*mass_multiplier/(length_multiplier**3)
+
+    masses = densities*volume_element
+
+    x_values = positions[:,0]
+    y_values = positions[:,1]
+    z_values = positions[:,2]
+
+    x_cm = np.sum(x_values*masses)/np.sum(masses)
+    y_cm = np.sum(y_values*masses)/np.sum(masses)
+    z_cm = np.sum(z_values*masses)/np.sum(masses)
+
+    x_values = x_values - x_cm
+    y_values = y_values - y_cm
+    z_values = z_values - z_cm
+
+    positions = np.column_stack((x_values, y_values, z_values))
+
+    total_momentum = np.nansum(velocities * masses[:, np.newaxis], axis=0)
+
+    velocities = velocities - total_momentum / np.sum(masses)
+
+    #USING DENSITY CRITERIA THAT THERE MUST BE MORE THAN 5 PARTICLES IN ONE CM^3
+
+    Msun_to_H = 1.989e30/1.67e-27
+    kpc_to_cm = 3.086e21
+
+    densities_criteria = densities * Msun_to_H/(kpc_to_cm**3)
+
+    mask = densities_criteria > 0.1
+
+    positions = positions[mask]
+    masses = masses[mask]
+    densities = densities[mask]
+    velocities = velocities[mask]
+
+    mask = np.isnan(velocities[:,0])
+
+    vx = velocities[:,0][~mask]
+    vy = velocities[:,1][~mask]
+    vz = velocities[:,2][~mask]
+
+    x = positions[:,0][~mask]
+    y = positions[:,1][~mask]
+    z = positions[:,2][~mask]
+
+    m = masses[~mask]
+    d = densities[~mask]
+
+    positions = np.column_stack((x, y, z))
+    velocities = np.column_stack((vx, vy, vz))
+    masses = m
+    densities = d
+
+    plt.scatter(x_cm, y_cm, color='r', s = 8)
+    plt.xticks([])
+    plt.yticks([])
+    plt.show()
+
+
+    return positions, masses, densities, velocities
+
+def Plot_3d_scatter_with_dm(xdata, ydata, zdata, dm_xdata, dm_ydata, dm_zdata, labelx, labely, labelz, title):
+    fig = plt.figure()
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, subplot_kw={'projection': '3d'}, figsize=(20, 8))
+
+    fig.suptitle(title, size=20)
+
+
+
+    ax1.scatter(xdata[::1000], ydata[::1000], zdata[::1000], marker='.', alpha=0.4)
+    ax1.scatter(dm_xdata[::100], dm_ydata[::100], dm_zdata[::100], marker='.', alpha=0.02, color = 'darksalmon')
+    ax1.view_init(elev=0, azim=0) 
+    ax1.set_ylabel(labely, size=15)
+    ax1.set_zlabel(labelz, size=15)
+    ax1.set_title('Y/Z Plane', size=20)
+    ax1.set_xticks([])
+    ax1.set_yticks([])
+    ax1.tick_params(axis='z', pad=8)
+    ax1.zaxis.labelpad = 20
+
+    
+
+    ax2.scatter(xdata[::1000], ydata[::1000], zdata[::1000], marker='.', alpha=0.4)
+    ax2.scatter(dm_xdata[::100], dm_ydata[::100], dm_zdata[::100], marker='.', alpha=0.02, color = 'darksalmon')
+    ax2.view_init(elev=90, azim=0) 
+    ax2.set_xlabel(labelx, size=15)
+    ax2.set_ylabel(labely, size=15)
+    ax2.set_title('X/Y Plane', size=20)
+    ax2.set_zticks([])
+    ax2.set_yticks([])
+    ax2.tick_params(axis='x', pad=8)
+    ax2.xaxis.labelpad = 20
+
+
+
+
+    ax3.scatter(xdata[::1000], ydata[::1000], zdata[::1000], marker='.', alpha=0.4)
+    ax3.scatter(dm_xdata[::100], dm_ydata[::100], dm_zdata[::100], marker='.', alpha=0.02, color = 'darksalmon')
+    ax3.view_init(elev=0, azim=90) 
+    ax3.set_xlabel(labelx, size=15)
+    ax3.set_zlabel(labelz, size=15)
+    ax3.set_title('X/Z Plane', size=20)
+    ax3.set_yticks([])
+    ax3.set_xticks([])
+    ax3.tick_params(axis='z', pad=8)
+    ax3.zaxis.labelpad = 20
+
+    plt.tight_layout()
+
+    plt.show()
+
+def Plot_3d_scatter(xdata, ydata, zdata, labelx, labely, labelz, title):
+    fig = plt.figure()
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, subplot_kw={'projection': '3d'}, figsize=(20, 8))
+
+    fig.suptitle(title, size=20)
+
+
+
+    ax1.scatter(xdata[::100], ydata[::100], zdata[::100], marker='.', alpha=0.3)
+    ax1.view_init(elev=0, azim=0) 
+    ax1.set_ylabel(labely, size=15)
+    ax1.set_zlabel(labelz, size=15)
+    ax1.set_title('Y/Z Plane', size=20)
+    ax1.set_xticks([])
+    ax1.set_yticks([])
+    ax1.tick_params(axis='z', pad=8)
+    ax1.zaxis.labelpad = 20
+
+    
+
+    ax2.scatter(xdata[::100], ydata[::100], zdata[::100], marker='.', alpha=0.3)
+    ax2.view_init(elev=90, azim=0) 
+    ax2.set_xlabel(labelx, size=15)
+    ax2.set_ylabel(labely, size=15)
+    ax2.set_title('X/Y Plane', size=20)
+    ax2.set_zticks([])
+    ax2.set_yticks([])
+    ax2.tick_params(axis='x', pad=8)
+    ax2.xaxis.labelpad = 20
+
+
+
+
+    ax3.scatter(xdata[::100], ydata[::100], zdata[::100], marker='.', alpha=0.3)
+    ax3.view_init(elev=0, azim=90) 
+    ax3.set_xlabel(labelx, size=15)
+    ax3.set_zlabel(labelz, size=15)
+    ax3.set_title('X/Z Plane', size=20)
+    ax3.set_yticks([])
+    ax3.set_xticks([])
+    ax3.tick_params(axis='z', pad=8)
+    ax3.zaxis.labelpad = 20
+
+    plt.tight_layout()
+
+    plt.show()
+
+
+def create_mapping(rdata):
+    #def rdist(vector):
+    #    return sum(x**2 for x in vector)**0.5
+
+    #points = sorted(points, key=rdist)
+
+
+    #x gives an array with the point with the lowest r values original index in the first element, the second lowest in the second element etc
+    x = np.argsort(rdata)
+
+    return x
+
+def create_quiver_graph(vectors, positions, colours):
+    fig = plt.figure(figsize=(10, 10))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, subplot_kw={'projection': '3d'}, figsize=(20, 15))
+
+    for i in range(len(vectors)):
+
+        ax1.quiver(positions[i][0], positions[i][1], positions[i][2], vectors[i][0], vectors[i][1], vectors[i][2], color=colours[i])
+        ax1.set_xlim([-1, 1])
+        ax1.set_ylim([-1, 1])
+        ax1.set_zlim([-1, 1])
+        ax1.view_init(elev=20, azim=0) 
+        ax1.set_xlabel('x')
+        ax1.set_ylabel('y')
+        ax1.set_zlabel('z')
+
+        ax2.quiver(positions[i][0], positions[i][1], positions[i][2], vectors[i][0], vectors[i][1], vectors[i][2], color=colours[i])
+        ax2.set_xlim([-1, 1])
+        ax2.set_ylim([-1, 1])
+        ax2.set_zlim([-1, 1])
+        ax2.view_init(elev=20, azim=80) 
+        ax2.set_xlabel('x')
+        ax2.set_ylabel('y')
+        ax2.set_zlabel('z')
+
+        ax3.quiver(positions[i][0], positions[i][1], positions[i][2], vectors[i][0], vectors[i][1], vectors[i][2], color=colours[i])
+        ax3.set_xlim([-1, 1])
+        ax3.set_ylim([-1, 1])
+        ax3.set_zlim([-1, 1])
+        ax3.view_init(elev=90, azim=90)
+        ax3.set_zticks([])
+        ax3.set_xlabel('x')
+        ax3.set_ylabel('y')
+        ax3.set_zlabel('z')
+
+    plt.show()
+
+def bins_calc(variables, cylindrical_shells, number_of_bins):
+    number_of_bins = number_of_bins
+    mean_variables = defaultdict(list)
+    upper_quart_variables = defaultdict(list)
+    lower_quart_variables = defaultdict(list)
+    mean_r = []
+    max_r = max(cylindrical_shells)
+    min_r = min(cylindrical_shells)
+    length_of_bins = (max_r - min_r)/number_of_bins
+
+
+    for i in range(number_of_bins):
+        max_r_for_bin = min_r + (i+1)*length_of_bins
+        min_r_for_bin = min_r + i*length_of_bins
+
+        mask = (cylindrical_shells > min_r_for_bin) & (cylindrical_shells < max_r_for_bin)
+        
+        for variable in variables:
+            variable_in_bin = variables[variable][mask]
+            if len(variable_in_bin) == 0:
+                continue
+            else:
+                mean_variables[variable].append(np.mean(variable_in_bin))
+                upper_quart_variables[variable].append(np.quantile(variable_in_bin, 0.84))
+                lower_quart_variables[variable].append(np.quantile(variable_in_bin, 0.16))
+        if len(variable_in_bin) == 0:
+            continue
+        else:
+            mean_r_for_bin = (max_r_for_bin + min_r_for_bin)/2
+            mean_r.append(mean_r_for_bin)
+    
+    return mean_r, mean_variables, upper_quart_variables, lower_quart_variables
+
+def create_rotation_matrix(velocities, points, mass_data, graphs):
+    angular_momenta = np.cross(points, velocities) * mass_data[:, np.newaxis]
+    total_angular_momentum = np.sum(angular_momenta, axis=0)
+
+    total_angular_momentum_unitv = total_angular_momentum/np.linalg.norm(total_angular_momentum)
+
+    #Now need to rotate axes so that the angular momentum vector is pointing along the Z direction
+    #This will make the galaxy be a disc in the xy plane and with anti clockwise rotation
+
+    def matrix_of_rotation(v1, v2):
+        cos = np.dot(v1, v2)
+        cross = np.cross(v1, v2)
+        sin = np.sum(cross**2)**0.5
+        cross = cross/sin
+        rotation_matrix = np.array([[cos + cross[0]**2*(1-cos), cross[0]*cross[1]*(1-cos) - cross[2]*sin, cross[0]*cross[2]*(1-cos) + cross[1]*sin],
+                                    [cross[1]*cross[0]*(1-cos) + cross[2]*sin, cos + cross[1]**2*(1-cos), cross[1]*cross[2]*(1-cos) - cross[0]*sin],
+                                    [cross[2]*cross[0]*(1-cos) - cross[1]*sin, cross[2]*cross[1]*(1-cos) + cross[0]*sin, cos + cross[2]**2*(1-cos)]])
+        #Rotation matrix found from wikipedia
+        return rotation_matrix
+    
+    rotation_matrix = matrix_of_rotation(total_angular_momentum_unitv, np.array([0, 0, 1]))
+
+    rotated_tot_ang_mom = np.dot(rotation_matrix, total_angular_momentum)
+
+    rotated_tot_ang_mom_unitv = rotated_tot_ang_mom/np.linalg.norm(rotated_tot_ang_mom)
+
+    if graphs == True:
+        create_quiver_graph([total_angular_momentum_unitv], [[0,0,0]], ['r'])
+        create_quiver_graph([rotated_tot_ang_mom_unitv], [[0,0,0]], ['r'])
+
+    print(rotation_matrix)
+    
+    return rotation_matrix
+
+def create_rotation_matrix_plane(gas_positions, gas_masses, gas_velocities):
+
+
+    mask = gas_masses == 0
+
+    gas_masses = gas_masses[~mask]
+    gas_positions = gas_positions[~mask]
+    gas_velocities = gas_velocities[~mask]
+
+    if len(gas_masses) == 0:
+        return np.eye(3)
+    
+    else:
+
+        centroid = np.average(gas_positions, axis=0, weights=gas_masses)
+
+        # Compute the mass-weighted inertia tensor
+        I = np.zeros((3, 3))
+        for i in range(0, len(gas_masses)):
+            r = gas_positions[i]
+            m = gas_masses[i]
+            I += m * (np.dot(r, r) * np.eye(3) - np.outer(r, r))
+
+        # Compute eigenvectors and eigenvalues
+        eigenvalues, eigenvectors = np.linalg.eigh(I)
+
+
+        # The eigenvector corresponding to the largest eigenvalue is the normal to the plane
+        plane_normal = eigenvectors[:, 2]  # Largest eigenvalue
+
+        # Plane equation: n.r = d
+        A, B, C = plane_normal
+        D = -np.dot(plane_normal, centroid)
+
+        plane_normal = plane_normal/np.linalg.norm(plane_normal)
+
+        def matrix_of_rotation(v1, v2):
+            cos = np.dot(v1, v2)
+            cross = np.cross(v1, v2)
+            sin = np.sum(cross**2)**0.5
+            cross = cross/sin
+            rotation_matrix = np.array([[cos + cross[0]**2*(1-cos), cross[0]*cross[1]*(1-cos) - cross[2]*sin, cross[0]*cross[2]*(1-cos) + cross[1]*sin],
+                                        [cross[1]*cross[0]*(1-cos) + cross[2]*sin, cos + cross[1]**2*(1-cos), cross[1]*cross[2]*(1-cos) - cross[0]*sin],
+                                        [cross[2]*cross[0]*(1-cos) - cross[1]*sin, cross[2]*cross[1]*(1-cos) + cross[0]*sin, cos + cross[2]**2*(1-cos)]])
+            #Rotation matrix found from wikipedia
+            return rotation_matrix
+        
+        gas_rotation_matrix = matrix_of_rotation(plane_normal, np.array([0, 0, 1]))
+
+        return gas_rotation_matrix
+    
+
+def compute_g_bar_radial(particle_positions, particle_masses, nbins, max_r):
+    M_sun = 1.989e30
+    kpc_to_m = 3.086e19
+    G_mks = G
+
+
+    R_part = particle_positions
+    R_max = max_r
+
+    R_edges = np.linspace(0, R_max, nbins + 1)
+    R_centers = (R_edges[1:] + R_edges[:-1])/2
+    dR = R_edges[1] - R_edges[0]
+
+    # Mass per radial bin in kg
+    mass_per_bin, _ = np.histogram(R_part, bins=R_edges, weights=particle_masses * M_sun)
+    R_centers_m = R_centers * kpc_to_m
+
+    g_bar = np.zeros_like(R_centers_m)
+    for i, Ri in enumerate(R_centers_m):
+        for j, Rj in enumerate(R_centers_m):
+            if mass_per_bin[j] == 0:
+                continue
+            dist = np.sqrt(Ri**2 + Rj**2)
+            g_bar[i] += G_mks * mass_per_bin[j] * Rj / dist**3
+
+    return R_centers, g_bar
+
+
+
+if __name__ == '__main__':
+
+    print('gas data loading')
+
+
+
+
+
+
+
+  
+    
