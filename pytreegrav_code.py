@@ -5,7 +5,18 @@ import glob
 from collections import defaultdict
 from pytreegrav import AccelTarget
 import pandas as pd
-import ozy
+
+
+LOCAL_GALDF_NH = os.path.join(os.path.dirname(__file__),
+                              "galaxies_dataframe.csv")
+DARNE_GALDF_NH = "/mnt/users/darnej/MPhys/galaxies_dataframe.csv"
+
+
+def _read_nh_galdf():
+    galdf_path = LOCAL_GALDF_NH
+    if not os.path.exists(galdf_path):
+        galdf_path = DARNE_GALDF_NH
+    return pd.read_csv(galdf_path, float_precision='round_trip')
 
 
 
@@ -18,9 +29,30 @@ import ozy
 
 #Pytreegrav code works better with the more particles you give it
 
-def run_pytreegrav(gal_number, ozy_file, r_half_index, sim):
+def _as_float_array(values):
+    if hasattr(values, "value"):
+        values = values.value
+    return np.asarray(values, dtype=float)
+
+
+def _target_height(galaxy_row, mode="fixed", fixed_height=0.1):
+    if mode == "fixed":
+        return float(fixed_height)
+    if mode == "gas_z_half":
+        return float(galaxy_row["gas_z_half"])
+    if mode == "stellar_z_half":
+        return float(galaxy_row["z_half"])
+    if mode == "max_fixed_gas_z_half":
+        return max(float(fixed_height), float(galaxy_row["gas_z_half"]))
+    raise ValueError(f"Unknown target_height_mode: {mode}")
+
+
+def run_pytreegrav(gal_number, ozy_file, r_half_index, sim,
+                   target_height_mode="fixed", fixed_height=0.1,
+                   target_family="baryon"):
 
     if sim == 'NH':
+        galaxy_row = _read_nh_galdf().iloc[int(gal_number)-1]
 
         directory = '/mnt/extraspace/currodri/newhorizon_rar/00925_100PerCentPurity/rar/particle_files/'
 
@@ -104,6 +136,10 @@ def run_pytreegrav(gal_number, ozy_file, r_half_index, sim):
 
 
     if sim == "TNG":
+        _galdf = pd.read_csv(
+            '/mnt/users/darnej/MPhys/TNG-50/Galaxy_dataframe_TNG.csv',
+            float_precision='round_trip')
+        galaxy_row = _galdf[_galdf['gal_number'] == int(gal_number)].iloc[0]
 
         from dynamics import load_all_data_TNG
 
@@ -250,6 +286,8 @@ def run_pytreegrav(gal_number, ozy_file, r_half_index, sim):
     
     positions_cylindrical = cartesian_to_cylindrical_points(positions_rotated[:,0], positions_rotated[:,1], positions_rotated[:,2])
 
+    gas_positions_cylindrical = cartesian_to_cylindrical_points(gas_positions_rotated[:,0], gas_positions_rotated[:,1], gas_positions_rotated[:,2])
+
     h1_positions_cylindrical = cartesian_to_cylindrical_points(h1_positions_rotated[:,0], h1_positions_rotated[:,1], h1_positions_rotated[:,2])
 
     h1_cylindrical_shells = h1_positions_cylindrical[:,0]
@@ -307,10 +345,35 @@ def run_pytreegrav(gal_number, ozy_file, r_half_index, sim):
         h = np.repeat(34/(1000), len(x))
         h_total = np.repeat(34/(1000), len(x_total))
 
-        mask = (cylindrical_shells < 5*r_half) & (z_points < 0.1) & (z_points > -0.1)
+    z_limit = _target_height(
+        galaxy_row, mode=target_height_mode, fixed_height=fixed_height)
 
-    x_targets = positions_rotated[mask]/max_position
-    h_targets = h[mask]
+    target_family = target_family.lower()
+    if target_family == "baryon":
+        target_positions = positions_rotated
+        target_velocities = velocities_rotated
+        target_cylindrical = positions_cylindrical
+        target_h = h
+    elif target_family == "gas":
+        target_positions = _as_float_array(gas_positions_rotated)
+        target_velocities = _as_float_array(gas_velocities_rotated)
+        target_cylindrical = gas_positions_cylindrical
+        target_h = np.repeat(34/(1000), len(target_positions))
+    elif target_family == "h1":
+        target_positions = _as_float_array(h1_positions_rotated)
+        target_velocities = _as_float_array(h1_velocities_rotated)
+        target_cylindrical = h1_positions_cylindrical
+        target_h = np.repeat(34/(1000), len(target_positions))
+    else:
+        raise ValueError(f"Unknown target_family: {target_family}")
+
+    target_shells = target_cylindrical[:,0]
+    target_z = target_cylindrical[:,2]
+    mask = ((target_shells < 5*r_half)
+            & (target_z < z_limit) & (target_z > -z_limit))
+
+    x_targets = target_positions[mask]/max_position
+    h_targets = target_h[mask]
 
 
    # print(x_targets.shape)
@@ -334,7 +397,7 @@ def run_pytreegrav(gal_number, ozy_file, r_half_index, sim):
         a_z = az
         return a_r, a_theta, a_z
 
-    velocities_targets = velocities_rotated[mask]
+    velocities_targets = target_velocities[mask]
 
     r = (x_targets[:,0]**2 + x_targets[:,1]**2)**0.5
     x = x_targets[:,0]
@@ -381,7 +444,7 @@ if __name__ == "__main__":
 
     chosen_gals_numbers = [998]
 
-    csv_dataframe = pd.read_csv('/mnt/users/darnej/MPhys/galaxies_dataframe.csv', float_precision='round_trip')
+    csv_dataframe = _read_nh_galdf()
 
     for i in range(len(chosen_gals_numbers)):
 
@@ -402,6 +465,4 @@ if __name__ == "__main__":
         df_total.to_csv('/mnt/users/darnej/MPhys/Pytree_testing/accelerations_total_'+str(chosen_gals_numbers[i])+'.csv')
 
         print('done')
-
-
 

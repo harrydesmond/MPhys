@@ -79,6 +79,22 @@ parser.add_argument("--csv", type=str, default=None,
 parser.add_argument("--sim", type=str, default=None,
                     help="Restrict to 'TNG' or 'NH' rows only.  When omitted "
                          "with --csv, both simulations are run and overlaid.")
+parser.add_argument("--gbar-def", choices=["sph", "tree"], default="sph",
+                    help="TNG/NH only: expose gbar_sph or gbar_tree as the "
+                         "SPARC-style gbar column.")
+parser.add_argument("--run-label", type=str, default="",
+                    help="Suffix added to result and plot filenames so "
+                         "production variants do not overwrite each other.")
+parser.add_argument("--png-only", action="store_true",
+                    help="Save only PNG plots, not PDFs.")
+parser.add_argument("--error-mode",
+                    choices=["default", "observational", "relative",
+                             "unweighted"],
+                    default="default",
+                    help="Variance model. default = observational for SPARC "
+                         "and constant relative for TNG/NH.")
+parser.add_argument("--relerr", type=float, default=0.10,
+                    help="Relative error used when --error-mode relative.")
 args = parser.parse_args()
 
 KPC2KM = units.kpc.to(units.km)
@@ -98,6 +114,47 @@ else:
 features = RARinterpret.parse_features(
     args.features if args.features is not None else _default_features)
 
+
+def result_label(sim_label):
+    """Stable file/plot label for a simulation and gbar definition."""
+    base = sim_label if not TNG_MODE else f"{sim_label}_gbar_{args.gbar_def}"
+    return f"{base}_{args.run_label}" if args.run_label else base
+
+
+def storage_label(model_name):
+    """Result label for SPARC mock models and already-labelled TNG models."""
+    if TNG_MODE or not args.run_label:
+        return model_name
+    return f"{model_name}_{args.run_label}"
+
+
+def plot_exts():
+    return ["png"] if args.png_only else ["png", "pdf"]
+
+
+def apply_error_model(frame):
+    mode = args.error_mode
+    if mode == "default":
+        mode = "relative" if TNG_MODE else "observational"
+    if mode == "observational":
+        return frame
+
+    nrow = len(frame["gobs"])
+    if mode == "relative":
+        variance = (args.relerr / numpy.log(10.0))**2
+    elif mode == "unweighted":
+        variance = 1.0
+    else:
+        raise ValueError(f"Unhandled error mode: {mode}")
+
+    def _constant_log_variance(_feat):
+        if mode == "unweighted" and _feat == "gbar":
+            return numpy.zeros(nrow, dtype=float)
+        return numpy.full(nrow, variance, dtype=float)
+
+    frame.generate_log_variance = _constant_log_variance
+    return frame
+
 # ── Build per-simulation data structures ──────────────────────────────────────
 # sim_data[label] = {frame, var_gbar, var_gobs, X_features,
 #                    rarif_obj, a0, sigma}     (last 3 TNG/NH only)
@@ -105,9 +162,10 @@ sim_data = {}
 
 for _sl in sim_labels:
     if TNG_MODE:
-        _frame = TNGFrame(args.csv, sim=_sl)
+        _frame = TNGFrame(args.csv, sim=_sl, gbar_def=args.gbar_def)
     else:
         _frame = RARinterpret.RARFrame()
+    _frame = apply_error_model(_frame)
 
     _var_gbar = _frame.generate_log_variance("gbar")
     _var_gobs = _frame.generate_log_variance("gobs")
@@ -134,7 +192,7 @@ def get_data(sim_label, gen_model_name, seed):
     var_gobs  = sd["var_gobs"]
 
     # Real data
-    if gen_model_name == sim_label:
+    if gen_model_name == result_label(sim_label):
         log_gbar = numpy.log10(frame["gbar"])
         log_gobs = numpy.log10(frame["gobs"])
         return log_gbar, log_gobs, var_gbar, var_gobs, None
@@ -144,7 +202,7 @@ def get_data(sim_label, gen_model_name, seed):
     # correlated (different radii of the same rotation curve), so sampling
     # rows directly would grossly underestimate uncertainty — we sample the
     # galaxy indices and pull all rows belonging to each drawn galaxy.
-    if gen_model_name == f"{sim_label}_bootstrap":
+    if gen_model_name == f"{result_label(sim_label)}_bootstrap":
         log_gbar_full = numpy.log10(frame["gbar"])
         log_gobs_full = numpy.log10(frame["gobs"])
         valid = numpy.isfinite(log_gbar_full) & numpy.isfinite(log_gobs_full)
@@ -207,7 +265,8 @@ def run_one(sim_label, gen_model_name, seed):
 # ── MPI loop — iterate over simulations then gen_models ──────────────────────
 for sim_label in sim_labels:
     if TNG_MODE:
-        GEN_MODELS = {sim_label: 1, f"{sim_label}_bootstrap": args.n_repeat}
+        _tag = result_label(sim_label)
+        GEN_MODELS = {_tag: 1, f"{_tag}_bootstrap": args.n_repeat}
     else:
         GEN_MODELS = {"SPARC": 1, "SIFEFE": args.n_repeat,
                       "SB-Jobs": args.n_repeat}
@@ -236,7 +295,7 @@ for sim_label in sim_labels:
             corrs  = numpy.array([c for chunk in all_corrs  for c in chunk])
             losses = numpy.array([l for chunk in all_losses for l in chunk])
             out    = {"loss": losses, "corr": corrs, "features": features}
-            fout   = f"../results/pc_RARIF_{gen_model_name}.p"
+            fout   = f"../results/pc_RARIF_{storage_label(gen_model_name)}.p"
             joblib.dump(out, fout)
             print(f"  Saved to {fout}", flush=True)
 
@@ -258,8 +317,9 @@ if rank == 0:
         _names.update(TNG_NAMES)
 
         for sim_label in sim_labels:
+            _tag = result_label(sim_label)
             cols = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-            data_real = joblib.load(f"../results/pc_RARIF_{sim_label}.p")
+            data_real = joblib.load(f"../results/pc_RARIF_{_tag}.p")
             # Order by |τ| on the full sample (the red crosses).
             tau_real = data_real["corr"][..., 0][0]
             ordering = numpy.argsort(numpy.abs(tau_real))[::-1]
@@ -275,11 +335,11 @@ if rank == 0:
                 # Full-sample τ — the "point estimate" the bootstrap refers to.
                 plt.scatter(xticks, tau_real[ordering],
                             c="red", marker="x", s=15,
-                            label=sim_label, zorder=10)
+                            label=_tag.replace("_", " "), zorder=10)
 
                 # Bootstrap distribution (galaxies resampled with replacement).
                 rhos = joblib.load(
-                    f"../results/pc_RARIF_{sim_label}_bootstrap.p"
+                    f"../results/pc_RARIF_{_tag}_bootstrap.p"
                 )["corr"][:, ordering, 0]
                 plt.scatter(xticks - 0.05, numpy.median(rhos, axis=0),
                             marker="_", s=15, c=cols[0],
@@ -298,17 +358,73 @@ if rank == 0:
                            columnspacing=0.2, handletextpad=0.1)
                 plt.tight_layout()
 
-                for ext in ["png", "pdf"]:
+                for ext in plot_exts():
                     fout = (f"../plots/fig2_partial_correlations_"
-                            f"{sim_label}.{ext}")
+                            f"{_tag}.{ext}")
                     plt.savefig(fout, dpi=450, bbox_inches="tight")
                     print(f"  Saved {fout}")
                 plt.close()
 
     else:
-        import sys
-        sys.path.insert(0, "../scripts_plots")
-        import plot_pc
-        plot_pc.make_pc_new("RARIF")
+        import os
+        import matplotlib.pyplot as plt
+        import scienceplots  # noqa: F401
+
+        os.makedirs("../plots", exist_ok=True)
+        cols = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        file = "../results/pc_RARIF_{}.p"
+
+        data_sparc = joblib.load(file.format(storage_label("SPARC")))
+        ordering = numpy.argsort(
+            numpy.abs(numpy.mean(data_sparc["corr"][..., 0], axis=0)))[::-1]
+        features_ordered = numpy.asanyarray(data_sparc["features"])[ordering]
+        xticks = numpy.arange(1, len(features_ordered) + 1)
+        quantiles = [norm.cdf(x=[-2, -1, 1, 2])] * len(features_ordered)
+
+        with plt.style.context(["science", {"text.usetex": False}]):
+            plt.figure()
+            plt.scatter(
+                xticks,
+                numpy.median(data_sparc["corr"][..., 0], axis=0)[ordering],
+                c="red", marker="x", s=15, label="SPARC", zorder=10)
+
+            rhos = joblib.load(
+                file.format(storage_label("SIFEFE")))["corr"][:, ordering, 0]
+            plt.scatter(xticks - 0.05, numpy.median(rhos, axis=0),
+                        marker="_", s=15, c=cols[0],
+                        label=r"Simple IF + EFE")
+            plt.violinplot(rhos, positions=xticks - 0.05,
+                           quantiles=quantiles, showextrema=False)
+
+            rhos = joblib.load(
+                file.format(storage_label("SB-Jobs")))["corr"][:, ordering, 0]
+            rhos_med = numpy.median(rhos, axis=0)
+            ylower = (rhos_med
+                      - numpy.percentile(rhos, 1e2 * norm.cdf(-2), axis=0))
+            yupper = (numpy.percentile(rhos, 1e2 * norm.cdf(2), axis=0)
+                      - rhos_med)
+            plt.errorbar(xticks + 0.05, rhos_med,
+                         yerr=numpy.vstack([ylower, yupper]),
+                         fmt=" ", marker="o",
+                         label=r"$\Sigma_{\rm tot} - J_{\rm obs}$",
+                         zorder=-1, ms=2, c=cols[2])
+
+            plt.axhline(0, ls="--", c="black",
+                        lw=plt.rcParams["axes.linewidth"])
+            plt.xticks(xticks,
+                       RARinterpret.pretty_label(
+                           features_ordered, RARinterpret.names),
+                       rotation=45)
+            plt.ylabel(r"$\tau(g_{\rm obs}, x_k | g_{\rm bar})$")
+            plt.legend(ncols=3, loc="upper right", fontsize="x-small",
+                       columnspacing=0.2, handletextpad=0.1)
+            plt.tight_layout()
+
+            suffix = f"_{args.run_label}" if args.run_label else ""
+            for ext in plot_exts():
+                fout = f"../plots/pcs_new_RARIF{suffix}.{ext}"
+                plt.savefig(fout, dpi=450, bbox_inches="tight")
+                print(f"  Saved {fout}")
+            plt.close()
 
     print("[Fig 2] Done.", flush=True)

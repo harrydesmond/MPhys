@@ -204,14 +204,29 @@ def load_rar_csv(gal_number, rar_dir):
     }
 
 
-def load_pytree_csv(gal_number, pytree_dir):
-    path = os.path.join(pytree_dir, f'pytree_results_{gal_number}.csv')
+def load_pytree_csv(gal_number, pytree_dir, override_dir=None):
+    filename = f'pytree_results_{gal_number}.csv'
+    path = os.path.join(pytree_dir, filename)
+    if override_dir is not None:
+        override_path = os.path.join(override_dir, filename)
+        if os.path.exists(override_path):
+            path = override_path
     if not os.path.exists(path):
         return None
     csv = pd.read_csv(path, float_precision='round_trip')
+    gbar_tree = np.array(csv['mean_a_r_py'], dtype=float)
+    gtot_tree = np.array(csv['mean_a_r_total_py'], dtype=float)
+
+    # Older pytree binning encoded empty annuli as exactly zero for both the
+    # baryonic and total tree accelerations.  Keep those bins as missing data
+    # when rebuilding the combined dataframe.
+    empty_tree_bins = (gbar_tree == 0.0) & (gtot_tree == 0.0)
+    gbar_tree[empty_tree_bins] = np.nan
+    gtot_tree[empty_tree_bins] = np.nan
+
     return {
-        'gbar_tree': np.array(csv['mean_a_r_py']),
-        'gtot_tree': np.array(csv['mean_a_r_total_py']),
+        'gbar_tree': gbar_tree,
+        'gtot_tree': gtot_tree,
         'mean_r':    np.array(csv['mean_r']),
     }
 
@@ -240,17 +255,19 @@ def build_dataframe(compute_surf_dens=True):
     configs = [
         ('TNG', chosen_TNG, df_gal_TNG,
          'gal_number', 'stellar_mass', 'gas_total_mass',
-         RAR_DIR_TNG, PYTREE_DIR_TNG),
+         RAR_DIR_TNG, PYTREE_DIR_TNG,
+         os.environ.get('PYTREE_DIR_TNG_OVERRIDE')),
         ('NH',  chosen_NH,  df_gal_NH,
          'Gal_number',  'mass',          'gas_mass',
-         RAR_DIR_NH,  PYTREE_DIR_NH),
+         RAR_DIR_NH,  PYTREE_DIR_NH,
+         os.environ.get('PYTREE_DIR_NH_OVERRIDE')),
     ]
 
     all_rows = []
 
     for (sim, chosen, df_gal,
          gal_col, mstar_col, mhi_col,
-         rar_dir, pytree_dir) in configs:
+         rar_dir, pytree_dir, pytree_override_dir) in configs:
 
         print(f'\nProcessing {sim}: {len(chosen)} galaxies')
 
@@ -273,7 +290,8 @@ def build_dataframe(compute_surf_dens=True):
 
             # --- per-point kinematics from CSVs ---
             rar    = load_rar_csv(gal_number, rar_dir)
-            pytree = load_pytree_csv(gal_number, pytree_dir)
+            pytree = load_pytree_csv(
+                gal_number, pytree_dir, override_dir=pytree_override_dir)
 
             if rar is None or pytree is None:
                 print(f'  [{sim} {gal_number}] missing RAR or pytree CSV, skipping')
@@ -319,6 +337,7 @@ def build_dataframe(compute_surf_dens=True):
                 all_rows.append({
                     # simulation source
                     'sim':                        sim,
+                    'gal_number':                 gal_number,
                     # radial position
                     'r_kpc':                      mean_r[j],
                     'r_over_Reff':                r_over_Reff[j],

@@ -6,7 +6,7 @@ Column mapping
 --------------
 CSV column                   → internal name (SPARC convention)
 ---------------------------------------------------------------------------
-gbar_sph (m/s²) × 1e10      → gbar   [1e-10 m/s²,  same as SPARC]
+gbar_sph or gbar_tree × 1e10 → gbar   [1e-10 m/s²,  same as SPARC]
 gobs     (m/s²) × 1e10      → gobs   [1e-10 m/s²]
 r_kpc                        → r     [kpc]
 stellar_surf_dens_Msun_kpc2  → SB    [M☉ / kpc²]
@@ -16,8 +16,9 @@ morphology_z_over_r          → type  [dimensionless ratio]
 vobs_km_s                    → Vobs  [km/s]
 vbar_tree_km_s               → Vbar  [km/s]
 
-Note: ~52 % of rows have NaN for gobs/gbar_sph (spherical-method failure at
-some radii).  By default the constructor drops those rows.
+The ``gbar_def`` constructor argument selects ``gbar_sph`` or ``gbar_tree``.
+By default the constructor drops rows with non-finite or non-positive values in
+``gobs``, the selected ``gbar`` column, or ``vobs_km_s``.
 """
 import numpy
 import pandas as pd
@@ -67,12 +68,22 @@ class TNGFrame:
     csv_path : str
         Path to ``Combined_TNG_NH_dataframe.csv`` (or equivalent).
     drop_nan : bool
-        Whether to drop rows where ``gobs`` / ``gbar_sph`` / ``vobs_km_s``
-        are NaN (default ``True``).  Set to ``False`` to keep all rows;
-        NaN values in the target will then propagate into the loss.
+        Whether to drop rows where ``gobs`` / selected ``gbar`` /
+        ``vobs_km_s`` are non-finite or non-positive (default ``True``).  Set
+        to ``False`` to keep all rows; invalid values in log-space targets
+        will then propagate into the loss.
+    gbar_def : {"sph", "tree"}
+        Which baryonic acceleration estimate to expose as SPARC-style
+        ``gbar``.  ``"sph"`` uses the enclosed-mass spherical approximation;
+        ``"tree"`` uses the Barnes-Hut particle-gravity estimate.
     """
 
-    def __init__(self, csv_path, drop_nan=True, sim=None):
+    _GBAR_COLUMNS = {
+        "sph": "gbar_sph",
+        "tree": "gbar_tree",
+    }
+
+    def __init__(self, csv_path, drop_nan=True, sim=None, gbar_def="sph"):
         """
         Parameters
         ----------
@@ -81,6 +92,13 @@ class TNGFrame:
             Requires the CSV to have a ``sim`` column (produced by
             ``build_combined_dataframe.py``).  ``None`` uses all rows.
         """
+        if gbar_def not in self._GBAR_COLUMNS:
+            raise ValueError(
+                "`gbar_def` must be one of "
+                f"{sorted(self._GBAR_COLUMNS)}; got {gbar_def!r}.")
+        self.gbar_def = gbar_def
+        self.gbar_column = self._GBAR_COLUMNS[gbar_def]
+
         df = pd.read_csv(csv_path)
 
         if sim is not None and "sim" in df.columns:
@@ -89,19 +107,29 @@ class TNGFrame:
             raise ValueError("CSV has no 'sim' column — rebuild with build_combined_dataframe.py")
 
         if drop_nan:
-            valid = df[["gobs", "gbar_sph", "vobs_km_s"]].notna().all(axis=1)
+            required = df[["gobs", self.gbar_column, "vobs_km_s"]]
+            valid = required.notna().all(axis=1)
+            valid &= (required > 0).all(axis=1)
             df = df[valid].reset_index(drop=True)
 
         # ── Assign integer galaxy indices ──────────────────────────────────
-        # Each galaxy is identified by its unique (Mstar_Msun, R_half_kpc) pair.
-        gal_keys = list(zip(df["Mstar_Msun"], df["R_half_kpc"]))
+        # Prefer the explicit simulation galaxy ID when present.  Older
+        # combined CSVs did not include it, so keep the property-pair fallback
+        # for backwards compatibility.
+        if "gal_number" in df.columns:
+            if "sim" in df.columns:
+                gal_keys = list(zip(df["sim"], df["gal_number"]))
+            else:
+                gal_keys = list(df["gal_number"])
+        else:
+            gal_keys = list(zip(df["Mstar_Msun"], df["R_half_kpc"]))
         unique_gals = {k: i for i, k in enumerate(dict.fromkeys(gal_keys))}
         df["_galaxy_index"] = [unique_gals[k] for k in gal_keys]
 
         # ── Unit conversion: m/s² → 1e-10 m/s² (SPARC convention) ─────────
         # This ensures RARIF's x0 ≈ 1.118 is sensible and GenComb targets
         # are on the same log scale as SPARC.
-        df["_gbar"] = df["gbar_sph"] * 1e10
+        df["_gbar"] = df[self.gbar_column] * 1e10
         df["_gobs"] = df["gobs"] * 1e10
 
         self._df = df
@@ -119,6 +147,7 @@ class TNGFrame:
         "type":  "morphology_z_over_r",
         "Vobs":  "vobs_km_s",
         "Vbar":  "vbar_tree_km_s",
+        "gal_number": "gal_number",
         "index": "_galaxy_index",
         # Stub columns so code that references them doesn't crash
         "SBdisk": "stellar_surf_dens_Msun_kpc2",

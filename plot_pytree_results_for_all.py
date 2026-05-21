@@ -6,9 +6,61 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 
 
+LOCAL_GALDF_NH = os.path.join(os.path.dirname(__file__),
+                              "galaxies_dataframe.csv")
+DARNE_GALDF_NH = "/mnt/users/darnej/MPhys/galaxies_dataframe.csv"
+DEFAULT_NH_STARS_DIR = "/mnt/users/darnej/MPhys/Stars_pytree"
+DEFAULT_NH_TOTAL_DIR = "/mnt/users/darnej/MPhys/Total_pytree"
+DEFAULT_NH_RESULTS_DIR = "/mnt/users/darnej/MPhys/pytree_results"
+DEFAULT_TNG_STARS_DIR = "/mnt/users/darnej/MPhys/TNG-50/Stars_pytree"
+DEFAULT_TNG_TOTAL_DIR = "/mnt/users/darnej/MPhys/TNG-50/Total_pytree"
+DEFAULT_TNG_RESULTS_DIR = "/mnt/users/darnej/MPhys/TNG-50/pytree_results"
 
 
-def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
+def _read_nh_galdf():
+    galdf_path = LOCAL_GALDF_NH
+    if not os.path.exists(galdf_path):
+        galdf_path = DARNE_GALDF_NH
+    return pd.read_csv(galdf_path, float_precision='round_trip')
+
+
+def _target_height(galaxy_row, mode="fixed", fixed_height=0.1):
+    if mode == "fixed":
+        return float(fixed_height)
+    if mode == "gas_z_half":
+        return float(galaxy_row["gas_z_half"])
+    if mode == "stellar_z_half":
+        return float(galaxy_row["z_half"])
+    if mode == "max_fixed_gas_z_half":
+        return max(float(fixed_height), float(galaxy_row["gas_z_half"]))
+    raise ValueError(f"Unknown target_height_mode: {mode}")
+
+
+def _acceleration_dirs(sim):
+    if sim == "NH":
+        return (
+            os.environ.get("PYTREE_STARS_DIR", DEFAULT_NH_STARS_DIR),
+            os.environ.get("PYTREE_TOTAL_DIR", DEFAULT_NH_TOTAL_DIR),
+        )
+    if sim == "TNG":
+        return (
+            os.environ.get("PYTREE_STARS_DIR", DEFAULT_TNG_STARS_DIR),
+            os.environ.get("PYTREE_TOTAL_DIR", DEFAULT_TNG_TOTAL_DIR),
+        )
+    raise ValueError(f"Unknown sim: {sim}")
+
+
+def _results_dir(sim):
+    if sim == "NH":
+        return os.environ.get("PYTREE_RESULTS_DIR", DEFAULT_NH_RESULTS_DIR)
+    if sim == "TNG":
+        return os.environ.get("PYTREE_RESULTS_DIR", DEFAULT_TNG_RESULTS_DIR)
+    raise ValueError(f"Unknown sim: {sim}")
+
+
+def plot_pytree_graphs(ozy_file, chosen_gals_number, sim,
+                       target_height_mode="fixed", fixed_height=0.1,
+                       target_family="baryon"):
 
     gal_number = chosen_gals_number
 
@@ -55,15 +107,20 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
         h1_masses = gas_data['h1_mass']
         h1_densities = gas_data['h1_density']
 
-        files = glob.glob('/mnt/users/darnej/MPhys/Stars_pytree/accelerations_star_' + str(gal_number) + '.csv')
+        stars_dir, total_dir = _acceleration_dirs(sim)
+        star_accel_path = os.path.join(
+            stars_dir, 'accelerations_star_' + str(gal_number) + '.csv')
+        total_accel_path = os.path.join(
+            total_dir, 'accelerations_total_' + str(gal_number) + '.csv')
+        files = glob.glob(star_accel_path)
 
         if len(files) == 0:
             return [0], [0], [0], [0]
 
         else:
 
-            csv_star = pd.read_csv('/mnt/users/darnej/MPhys/Stars_pytree/accelerations_star_' + str(gal_number) + '.csv', float_precision='round_trip')
-            csv_total = pd.read_csv('/mnt/users/darnej/MPhys/Total_pytree/accelerations_total_' + str(gal_number) + '.csv', float_precision='round_trip')
+            csv_star = pd.read_csv(star_accel_path, float_precision='round_trip')
+            csv_total = pd.read_csv(total_accel_path, float_precision='round_trip')
 
     if sim == 'TNG':
 
@@ -110,14 +167,19 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
         h1_masses = h1_masses[mask]
         h1_densities = h1_densities[mask]
 
-        files = glob.glob('/mnt/users/darnej/MPhys/TNG-50/Stars_pytree/accelerations_star_' + str(gal_number) + '.csv')
+        stars_dir, total_dir = _acceleration_dirs(sim)
+        star_accel_path = os.path.join(
+            stars_dir, 'accelerations_star_' + str(gal_number) + '.csv')
+        total_accel_path = os.path.join(
+            total_dir, 'accelerations_total_' + str(gal_number) + '.csv')
+        files = glob.glob(star_accel_path)
 
         if len(files) == 0:
             return [0], [0], [0], [0]
 
         else:
-            csv_star = pd.read_csv('/mnt/users/darnej/MPhys/TNG-50/Stars_pytree/accelerations_star_' + str(gal_number) + '.csv', float_precision='round_trip')
-            csv_total = pd.read_csv('/mnt/users/darnej/MPhys/TNG-50/Total_pytree/accelerations_total_' + str(gal_number) + '.csv', float_precision='round_trip')
+            csv_star = pd.read_csv(star_accel_path, float_precision='round_trip')
+            csv_total = pd.read_csv(total_accel_path, float_precision='round_trip')
 
 
     kpc_to_m = 3.086e+19
@@ -153,7 +215,8 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
 
     if sim == 'NH':
 
-        csv_dataframe = pd.read_csv('/mnt/users/darnej/MPhys/galaxies_dataframe.csv', float_precision='round_trip')
+        csv_dataframe = _read_nh_galdf()
+        galaxy_row = csv_dataframe.iloc[int(gal_number)-1]
 
         r_half_index = np.array(csv_dataframe['gas_r_half_index'])[int(gal_number)-1]
 
@@ -178,6 +241,7 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
         csv_dataframe = pd.read_csv('/mnt/users/darnej/MPhys/TNG-50/Galaxy_dataframe_TNG.csv', float_precision='round_trip')
 
         indices = np.array(csv_dataframe['gal_number'])
+        galaxy_row = csv_dataframe[int(gal_number) == indices].iloc[0]
 
         r_half_index = np.array(csv_dataframe['gas_r_half_index'])[int(gal_number) == indices][0]
 
@@ -236,6 +300,8 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
 
     cylindrical_points = cartesian_to_cylindrical_points(rotated_points[:,0], rotated_points[:,1], rotated_points[:,2])
 
+    gas_cylindrical_points = cartesian_to_cylindrical_points(gas_positions_rotated[:,0], gas_positions_rotated[:,1], gas_positions_rotated[:,2])
+
     h1_cylindrical_points = cartesian_to_cylindrical_points(h1_positions_rotated[:,0], h1_positions_rotated[:,1], h1_positions_rotated[:,2])
 
     cylindrical_shells = cylindrical_points[:,0]
@@ -254,9 +320,24 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
 
     print('R_half is',r_half)
 
-    mask = (cylindrical_shells < 5*r_half) & (z_points < 0.1) & (z_points > -0.1)
+    z_limit = _target_height(
+        galaxy_row, mode=target_height_mode, fixed_height=fixed_height)
+    target_family = target_family.lower()
+    if target_family == "baryon":
+        target_cylindrical = cylindrical_points
+    elif target_family == "gas":
+        target_cylindrical = gas_cylindrical_points
+    elif target_family == "h1":
+        target_cylindrical = h1_cylindrical_points
+    else:
+        raise ValueError(f"Unknown target_family: {target_family}")
 
-    Rdata_5r_12 = cylindrical_shells[mask]
+    target_shells = target_cylindrical[:,0]
+    target_z = target_cylindrical[:,2]
+    mask = ((target_shells < 5*r_half)
+            & (target_z < z_limit) & (target_z > -z_limit))
+
+    Rdata_5r_12 = target_shells[mask]
 
     number_of_bins = 30
 
@@ -277,7 +358,7 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
 
         mean_r.append(bincenters[i])
 
-        mask = ((Rdata_5r_12 > minr_in_bin) & (Rdata_5r_12 < maxr_in_bin))
+        mask = ((Rdata_5r_12 >= minr_in_bin) & (Rdata_5r_12 < maxr_in_bin))
 
         if len(a_r_star[mask]) != 0:
 
@@ -292,18 +373,13 @@ def plot_pytree_graphs(ozy_file, chosen_gals_number, sim):
                 potential_weird_gals[gal_number].append(i)
 
         else:
-            mean_a_r_py.append(0)
-            mean_a_theta_py.append(0)
-            mean_a_z_py.append(0)
+            # Empty target annuli are missing measurements, not zero gravity.
+            mean_a_r_py.append(np.nan)
+            mean_a_theta_py.append(np.nan)
+            mean_a_z_py.append(np.nan)
 
-            mean_a_r_total_py.append(0)
-
-
-
-    mean_r = [x for x in mean_r if not np.isnan(mean_a_r_py[mean_r.index(x)])]
-    mean_a_r_py = [x for x in mean_a_r_py if not np.isnan(x)]
-    mean_a_r_total_py = [x for x in mean_a_r_total_py if not np.isnan(x)]
-
+            mean_a_r_total_py.append(np.nan)
+            potential_weird_gals[gal_number].append(f'empty_bin_{i}')
 
     return mean_a_r_py, mean_a_r_total_py, mean_r, potential_weird_gals
 
@@ -319,11 +395,20 @@ if __name__ == '__main__':
     ozy_file = ozy_files[0]
 
     for i in chosen_gals:
-        mean_a_r_py, mean_a_r_total_py, mean_r = plot_pytree_graphs(ozy_file, i)
+        mean_a_r_py, mean_a_r_total_py, mean_r, potential_weird_gals = plot_pytree_graphs(
+            ozy_file, i, 'NH',
+            target_height_mode=os.environ.get(
+                'PYTREE_TARGET_HEIGHT_MODE', 'fixed'),
+            fixed_height=float(os.environ.get(
+                'PYTREE_FIXED_HEIGHT_KPC', '0.1')),
+            target_family=os.environ.get('PYTREE_TARGET_FAMILY', 'baryon'))
 
         results = pd.DataFrame({'mean_a_r_py': mean_a_r_py, 'mean_a_r_total_py': mean_a_r_total_py, 'mean_r': mean_r})
-        results.to_csv('/mnt/users/darnej/MPhys/pytree_results/pytree_results_' + str(i) + '.csv', index=False)
+        results_dir = _results_dir('NH')
+        os.makedirs(results_dir, exist_ok=True)
+        results.to_csv(os.path.join(
+            results_dir, 'pytree_results_' + str(i) + '.csv'), index=False)
 
         print(i)
+        print(potential_weird_gals)
         print('done')
-

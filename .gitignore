@@ -6,6 +6,15 @@ __pycache__/
 # SLURM job output
 *.out
 
+# Local analysis scratch/output directories
+RARinterpret/backups/
+RARinterpret/smoke_*/
+pytree_rerun*/
+
+# Local backup data products
+Combined_TNG_NH_dataframe_before_*.csv
+Combined_TNG_NH_dataframe_no_gal_number.csv
+
 # Large numpy sample files (>100MB)
 samples_53_scatter_EFE0_rar.npy
 

@@ -1,10 +1,47 @@
 from collections import defaultdict
+import os
+import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import h5py
-import ozy
+import warnings
+
+_OZYMANDIAS = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), '..', 'ozymandias'))
+if os.path.isdir(_OZYMANDIAS) and _OZYMANDIAS not in sys.path:
+    sys.path.insert(0, _OZYMANDIAS)
+
+try:
+    import ozy
+except Exception as exc:
+    from unyt import UnitRegistry, unyt_array, unyt_quantity
+
+    class _MinimalOZYSnapshot:
+        def __init__(self, filename):
+            with h5py.File(filename, 'r') as hd:
+                self.unit_registry = UnitRegistry.from_json(
+                    hd.attrs['unit_registry_json'])
+
+        def array(self, value, units):
+            return unyt_array(value, units, registry=self.unit_registry)
+
+        def quantity(self, value, units):
+            return unyt_quantity(value, units, registry=self.unit_registry)
+
+    class _MinimalOZY:
+        @staticmethod
+        def load(filename):
+            return _MinimalOZYSnapshot(filename)
+
+    warnings.warn(
+        f"Falling back to minimal OZY unit loader because full ozy import "
+        f"failed: {exc!r}")
+    ozy = _MinimalOZY()
 from scipy.constants import G
-import illustris_python as il
+try:
+    import illustris_python as il
+except ImportError:
+    il = None
 
 def load_all_data(star_filename, dm_filename, gas_filename, ozy_file):
 
@@ -263,6 +300,8 @@ def load_all_data(star_filename, dm_filename, gas_filename, ozy_file):
     return star_data, dm_data, gas_data, mass_multiplier, length_multiplier, time_multiplier
 
 def load_all_data_TNG(file_num):
+    if il is None:
+        raise ImportError("load_all_data_TNG requires illustris_python")
 
     star_data = defaultdict(list)
     dm_data = defaultdict(list)
@@ -1015,7 +1054,3 @@ if __name__ == '__main__':
 
 
 
-
-
-  
-    
