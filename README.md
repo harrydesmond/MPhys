@@ -91,8 +91,14 @@ Main scripts:
 - `run_fig2_pc.py`: partial correlations, corresponding to Fig. 2.
 - `run_fig6_grid.py`: ExtraTrees feature-pair grid, corresponding to Fig. 6.
 - `run_fig7_gencomb.py`: generic variable/angle scan, corresponding to Fig. 7.
+- `run_sparc_treeparam_grid.py`: SPARC/fRAR Optuna cache regeneration for
+  the Fig. 6 single/pair grid, the Fig. 7 all-feature cache, and Table-2
+  `gbar` checks.
 - `run_tngnh_treeparam_grid.py`: simulation-specific ExtraTrees hyperparameter
-  cache generation for `simhyper` runs.
+  cache generation for `simhyper` runs, including optional all-feature
+  combinations used by fRAR-style Fig. 7.
+- `compare_sparc_table2.py`: diagnostic comparison between regenerated SPARC
+  `gbar` hyperparameter caches and the fRAR Table 2 values.
 
 Wrapper scripts:
 
@@ -102,6 +108,10 @@ Wrapper scripts:
   `job_tngnh_fig7_glam.sh`: TNG/NH runs; first positional argument is `sph` or
   `tree`.
 - `job_tngnh_hyperopt_glam.sh`: simulation-specific hyperparameter caches.
+- `job_sparc_hyperopt_glam.sh` and `submit_sparc_hyperopt_glam.sh`: SPARC
+  Optuna cache regeneration under `../results/hyper_sparc_optuna`.
+- `submit_frarhyper_plot_reruns_glam.sh`: batch rerun of the SPARC fRAR-hyper
+  Fig. 6/7 plots plus the TNG/NH fRAR-style Fig. 7 plots.
 
 Outputs are written under `RARinterpret/plots/` and `RARinterpret/results/`.
 Use `--png-only` for non-publication variants; without it, scripts save both
@@ -248,6 +258,58 @@ Use them in Fig. 6/7:
 
 Replace `tree` with `sph` for the spherical variants.
 
+## fRAR-Style SPARC Hyperparameter Regeneration
+
+The original fRAR Fig. 6 convention uses one ExtraTrees Optuna cache for every
+single feature and every pair of SPARC features. The Fig. 7 convention is
+different: single-feature curves use the `gobs`-from-`gbar` cache, while
+multi-feature curves use the `gobs`-from-all-features cache. Regenerating these
+SPARC caches is useful when reproducing the paper figures or checking the
+available environment against fRAR Table 2.
+
+Submit the SPARC ET cache job:
+
+```bash
+QUEUE=berg TRIALS=10000 NFOLDS=5 RUN=paper_et ./submit_sparc_hyperopt_glam.sh
+```
+
+Optional Table-2 XGB check:
+
+```bash
+QUEUE=berg TRIALS=10000 NFOLDS=5 RUN=table2_xgb ./submit_sparc_hyperopt_glam.sh
+```
+
+After the SPARC caches complete, compare the regenerated `gbar` caches to the
+paper values:
+
+```bash
+python compare_sparc_table2.py --hyper-dir ../results/hyper_sparc_optuna
+```
+
+To remake the SPARC Fig. 6/7 and TNG/NH Fig. 7 products with these
+paper-style hyperparameter conventions:
+
+```bash
+QUEUE=berg ./submit_frarhyper_plot_reruns_glam.sh
+```
+
+Representative output plots:
+
+```text
+../plots/feature_grid_frarhyper.png
+../plots/gencomb_sharedET_frarhyper.png
+../plots/fig7_gencomb_TNG_gbar_sph_simhyper_frar.png
+../plots/fig7_gencomb_NH_gbar_sph_simhyper_frar.png
+../plots/fig7_gencomb_TNG_gbar_tree_simhyper_frar.png
+../plots/fig7_gencomb_NH_gbar_tree_simhyper_frar.png
+```
+
+For direct manual runs, `run_fig7_gencomb.py` accepts
+`--fig7-hyper-mode frar|feature`. The default `frar` mode follows the paper:
+single-feature Fig. 7 curves use `ET_gobs_gbar`, and multi-feature curves use
+the all-feature `gobs` cache. Use `feature` only when intentionally testing
+one cache per plotted feature combination.
+
 ## Batch Submission On Glamdring
 
 The batch submitters create one wrapper per Slurm job and submit with
@@ -264,6 +326,18 @@ Simulation-specific hyperparameter batch:
 
 ```bash
 QUEUE=berg TRIALS=10000 NFOLDS=5 ./submit_tngnh_hyperopt_glam.sh
+```
+
+To generate only the TNG/NH all-feature Fig. 7 caches needed by
+`--fig7-hyper-mode frar`, use `run_tngnh_treeparam_grid.py` directly:
+
+```bash
+python run_tngnh_treeparam_grid.py \
+  --csv ../../Combined_TNG_NH_dataframe.csv \
+  --sim both --gbar-def both \
+  --only-combo gbar,r,SB,MHI,Mstar,Reff,type \
+  --trials 10000 --nfolds 5 \
+  --outdir ../results/hyper_sim
 ```
 
 NH 539 tree refresh batch:
@@ -299,3 +373,12 @@ that use `../results/hyper_sim` with `--hyper-scope sim`.
   feature grid and mock construction.
 - `--hyper-dir DIR` and `--hyper-scope shared|sim`: choose shared or
   simulation-specific ExtraTrees hyperparameter caches.
+- `--fig7-hyper-mode frar|feature`: Fig. 7 hyperparameter-cache policy.
+  `frar` follows the paper convention; `feature` uses each plotted feature
+  combination's own cache.
+- `run_sparc_treeparam_grid.py --mode fig6|fig7|paper|table2`: choose which
+  SPARC Optuna cache set to regenerate. `paper` is `fig6 + fig7`.
+- `run_tngnh_treeparam_grid.py --include-combo FEATURES`: add an exact
+  feature combination to the default single/pair simulation hyperopt grid.
+- `run_tngnh_treeparam_grid.py --only-combo FEATURES`: optimise only one or
+  more exact feature combinations.

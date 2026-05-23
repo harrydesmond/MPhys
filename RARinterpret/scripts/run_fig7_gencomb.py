@@ -114,6 +114,14 @@ parser.add_argument("--hyper-scope", choices=["shared", "sim"],
                     default="shared",
                     help="shared: ET_gobs_<features>.p; sim: prefer "
                          "ET_gobs_<features>_<sim>_gbar_<def>.p.")
+parser.add_argument("--fig7-hyper-mode",
+                    choices=["frar", "feature"],
+                    default="frar",
+                    help="frar: match the original fRAR Fig. 7 convention "
+                         "by using the gobs/gbar hyperparameters for "
+                         "single-feature predictors and the gobs/all-feature "
+                         "hyperparameters for multi-feature predictors. "
+                         "feature: use ET_gobs_<feature-combo> directly.")
 args = parser.parse_args()
 
 # ── Theta grid ────────────────────────────────────────────────────────────────
@@ -142,11 +150,16 @@ if TNG_MODE:
     from RARinterpret.tng_read import TNGFrame, TNG_FEATURES, TNG_NAMES
     sim_labels = [args.sim] if args.sim is not None else ["TNG", "NH"]
     FEATURE_COMBOS = SIM_FEATURE_COMBOS
+    FRAR_ALL_FEATURE_KEY = ",".join(TNG_FEATURES)
     LEFT_FEATURES = set()   # no SB-Jobs mocks in TNG/NH mode
 else:
     sim_labels = ["SPARC"]
+    FRAR_ALL_FEATURE_KEY = (
+        "gbar,r,SBdisk,SBbul,SB,dist,inc,L36,MHI,type,Reff,"
+        "log_eN_noclust")
     if args.sparc_sim_style:
         FEATURE_COMBOS = SIM_FEATURE_COMBOS
+        FRAR_ALL_FEATURE_KEY = "gbar,SB,MHI,type,Reff"
         LEFT_FEATURES = {"gbar", "SB", "type"}
     else:
         FEATURE_COMBOS = {
@@ -270,18 +283,32 @@ def fit_sbjobs_for_frame(frame):
     return model, numpy.asarray(result.x), sigma, result
 
 
+def hyper_key_for_fig7(feat_key, feat_list):
+    """Return the gobs-regression hyperparameter key used for Fig. 7."""
+    if args.fig7_hyper_mode == "feature":
+        return feat_key
+    return "gbar" if len(feat_list) == 1 else FRAR_ALL_FEATURE_KEY
+
+
+def hyper_file_for(feat_key, feat_list, sim_label=None):
+    """Return the preferred hyperparameter cache file for this Fig. 7 curve."""
+    hyper_key = hyper_key_for_fig7(feat_key, feat_list)
+    fhyper = join(args.hyper_dir, f"ET_gobs_{hyper_key}.p")
+    if args.hyper_scope == "sim" and TNG_MODE and sim_label is not None:
+        fsim = join(args.hyper_dir,
+                    f"ET_gobs_{hyper_key}_{sim_label}_gbar_"
+                    f"{args.gbar_def}.p")
+        if isfile(fsim):
+            return fsim
+    return fhyper
+
+
 def fit_et(frame, X, y, w, test_masks, feat_key=None, sim_label=None):
     """Run ET on all n_splits splits, return per-obs loss array."""
     base = clone(pipeline)
     if feat_key is not None:
-        fhyper = join(args.hyper_dir, f"ET_gobs_{feat_key}.p")
-        if (args.hyper_scope == "sim" and TNG_MODE
-                and sim_label is not None):
-            fsim = join(args.hyper_dir,
-                        f"ET_gobs_{feat_key}_{sim_label}_gbar_"
-                        f"{args.gbar_def}.p")
-            if isfile(fsim):
-                fhyper = fsim
+        fhyper = hyper_file_for(feat_key, FEATURE_COMBOS[feat_key],
+                                sim_label=sim_label)
         if isfile(fhyper):
             best = joblib.load(fhyper)["best_params"]
             base.set_params(**best)
@@ -486,6 +513,17 @@ for sim_label in sim_labels:
               f"{len(FEATURE_COMBOS)} feature combos, {size} ranks. "
               f"n_splits={args.n_splits}, n_resample={args.n_resample}, "
               f"n_est={args.n_estimators}", flush=True)
+        missing_hyper = []
+        for _key, _features in FEATURE_COMBOS.items():
+            _fhyper = hyper_file_for(_key, _features, sim_label=sim_label)
+            if not isfile(_fhyper):
+                missing_hyper.append((_key, _fhyper))
+        if missing_hyper:
+            print(f"[Fig 7] [{_label}] WARNING: {len(missing_hyper)} "
+                  "hyperparameter cache(s) missing; affected curves will use "
+                  "the estimator defaults.", flush=True)
+            for _key, _fhyper in missing_hyper:
+                print(f"  missing hyper for {_key}: {_fhyper}", flush=True)
     else:
         chunks = None
     my_theta_indices = comm.scatter(chunks, root=0)

@@ -42,6 +42,13 @@ parser.add_argument("--sim", choices=["TNG", "NH", "both"], default="both")
 parser.add_argument("--gbar-def", choices=["sph", "tree", "both"],
                     default="both")
 parser.add_argument("--features", type=str, default=None)
+parser.add_argument("--include-combo", action="append", default=[],
+                    help="Additional comma-separated feature combination to "
+                         "optimise exactly, beyond the default single/pair "
+                         "grid. May be passed more than once.")
+parser.add_argument("--only-combo", action="append", default=[],
+                    help="Only optimise this comma-separated feature "
+                         "combination. May be passed more than once.")
 parser.add_argument("--target", choices=["gobs"], default="gobs")
 parser.add_argument("--trials", type=int, default=10000)
 parser.add_argument("--nfolds", type=int, default=5)
@@ -54,8 +61,19 @@ args = parser.parse_args()
 
 FEATURES = (RARinterpret.parse_features(args.features)
             if args.features is not None else list(TNG_FEATURES))
-COMBOS = ([(f, [f]) for f in FEATURES]
-          + [(f"{fi},{fj}", [fi, fj]) for fi, fj in combinations(FEATURES, 2)])
+if args.only_combo:
+    COMBOS = []
+    for combo in args.only_combo:
+        feats = RARinterpret.parse_features(combo)
+        COMBOS.append((",".join(feats), feats))
+else:
+    COMBOS = ([(f, [f]) for f in FEATURES]
+              + [(f"{fi},{fj}", [fi, fj])
+                 for fi, fj in combinations(FEATURES, 2)])
+    for combo in args.include_combo:
+        feats = RARinterpret.parse_features(combo)
+        COMBOS.append((",".join(feats), feats))
+COMBOS = list(dict(COMBOS).items())
 SIMS = ["TNG", "NH"] if args.sim == "both" else [args.sim]
 GBARS = ["sph", "tree"] if args.gbar_def == "both" else [args.gbar_def]
 
